@@ -7,6 +7,25 @@ type Props = {
   onGameCreated: (gameId: string) => void;
 };
 
+const PIECE_PRIORITY = [
+  "King",
+  "Queen",
+  "Rook 1",
+  "Rook 2",
+  "Bishop 1",
+  "Bishop 2",
+  "Knight 1",
+  "Knight 2",
+  "Pawn 1",
+  "Pawn 2",
+  "Pawn 3",
+  "Pawn 4",
+  "Pawn 5",
+  "Pawn 6",
+  "Pawn 7",
+  "Pawn 8"
+];
+
 function parseIds(value: string) {
   return value
     .split(/[,\s]+/)
@@ -15,12 +34,40 @@ function parseIds(value: string) {
     .slice(0, 16);
 }
 
+function randomId(exclude: Set<number>) {
+  let id: number;
+  do {
+    id = Math.floor(Math.random() * 10000);
+  } while (exclude.has(id));
+  return id;
+}
+
+function buildAutoFillIds(ownedIds: number[]) {
+  const used = new Set<number>();
+  const assigned: { slot: string; id: number; owned: boolean }[] = [];
+  const owned = [...ownedIds];
+  for (const slot of PIECE_PRIORITY) {
+    if (owned.length > 0) {
+      const id = owned.shift() as number;
+      used.add(id);
+      assigned.push({ slot, id, owned: true });
+    } else {
+      const id = randomId(used);
+      used.add(id);
+      assigned.push({ slot, id, owned: false });
+    }
+  }
+  return assigned;
+}
+
 export function PlayerSetup({ onGameCreated }: Props) {
   const [session, setSession] = useState<Session | null>(null);
+  const [mode, setMode] = useState<"manual" | "random">("manual");
   const [whiteIds, setWhiteIds] = useState("");
   const [blackIds, setBlackIds] = useState("");
   const [blackAddress, setBlackAddress] = useState("");
   const [holdings, setHoldings] = useState<number[]>([]);
+  const [assigned, setAssigned] = useState<{ slot: string; id: number; owned: boolean }[]>([]);
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
 
@@ -39,13 +86,31 @@ export function PlayerSetup({ onGameCreated }: Props) {
       const res = await fetch(`/api/normies/holder/${session.address}`);
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Could not load holdings.");
-      setHoldings(data.tokenIds || []);
-      setWhiteIds((data.tokenIds || []).slice(0, 16).join(", "));
+      const ownedIds: number[] = data.tokenIds || [];
+      setHoldings(ownedIds);
+      if (mode === "manual") {
+        setWhiteIds(ownedIds.slice(0, 16).join(", "));
+      } else {
+        const result = buildAutoFillIds(ownedIds);
+        setAssigned(result);
+        setWhiteIds(result.map((r) => r.id).join(", "));
+      }
     } catch (err) {
       setMessage((err as Error).message);
     } finally {
       setBusy(false);
     }
+  }
+
+  function ownedIdsForSubmit() {
+    // Manual mode (or no auto-fill run yet): treat everything typed as a
+    // claimed-owned id, same as before. Auto-fill mode: only assert
+    // ownership for ids we actually pulled from holdings; the rest are
+    // submitted as unverified "borrowed" pieces.
+    if (mode === "random" && assigned.length) {
+      return assigned.filter((a) => a.owned).map((a) => a.id);
+    }
+    return parseIds(whiteIds);
   }
 
   async function createGame() {
@@ -57,6 +122,7 @@ export function PlayerSetup({ onGameCreated }: Props) {
         body: JSON.stringify({
           blackAddress,
           whiteNormieIds: parseIds(whiteIds),
+          whiteOwnedIds: ownedIdsForSubmit(),
           blackNormieIds: parseIds(blackIds),
           verifyOwnership: true
         })
@@ -77,7 +143,11 @@ export function PlayerSetup({ onGameCreated }: Props) {
     try {
       const res = await apiFetch("/api/challenges/create", {
         method: "POST",
-        body: JSON.stringify({ normieIds: parseIds(whiteIds), message: "Open Normies Chess challenge" })
+        body: JSON.stringify({
+          normieIds: parseIds(whiteIds),
+          ownedIds: ownedIdsForSubmit(),
+          message: "Open Normies Chess challenge"
+        })
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Could not create challenge.");
@@ -95,14 +165,55 @@ export function PlayerSetup({ onGameCreated }: Props) {
         <h1 style={{ margin: 0, fontSize: 24 }}>Battle setup</h1>
         <p className="tiny">Sign in, load your Normies, enter exactly 16 IDs per side, then start or post a challenge.</p>
       </div>
+
+      <div className="split" style={{ gap: 8 }}>
+        <button
+          className="btn"
+          style={{ opacity: mode === "manual" ? 1 : 0.5 }}
+          onClick={() => setMode("manual")}
+        >
+          Enter IDs manually
+        </button>
+        <button
+          className="btn"
+          style={{ opacity: mode === "random" ? 1 : 0.5 }}
+          onClick={() => setMode("random")}
+        >
+          Auto-fill (random fetch)
+        </button>
+      </div>
+
       <button className="btn secondary" onClick={loadHoldings} disabled={!session || busy}>
-        Load my Normies
+        {mode === "random" ? "Fetch and assign my Normies" : "Load my Normies"}
       </button>
-      {holdings.length ? <div className="tiny">{holdings.length} holder tokens loaded. First 16 filled in.</div> : null}
-      <label className="stack">
-        <span className="tiny">Your 16 Normie IDs</span>
-        <textarea className="field" rows={4} value={whiteIds} onChange={(e) => setWhiteIds(e.target.value)} />
-      </label>
+      {mode === "manual" && holdings.length ? (
+        <div className="tiny">{holdings.length} holder tokens loaded. First 16 filled in.</div>
+      ) : null}
+
+      {mode === "manual" ? (
+        <label className="stack">
+          <span className="tiny">Your 16 Normie IDs</span>
+          <textarea className="field" rows={4} value={whiteIds} onChange={(e) => setWhiteIds(e.target.value)} />
+        </label>
+      ) : (
+        <div className="stack">
+          {assigned.length > 0 ? (
+            <div className="stack" style={{ gap: 2 }}>
+              {assigned.map((a) => (
+                <div key={a.slot} className="tiny split">
+                  <span>{a.slot}</span>
+                  <span>
+                    #{a.id} {a.owned ? "(owned)" : "(random)"}
+                  </span>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="tiny">Click &quot;Fetch and assign my Normies&quot; to auto-build your 16 pieces.</div>
+          )}
+        </div>
+      )}
+
       <label className="stack">
         <span className="tiny">Opponent wallet</span>
         <input className="field" value={blackAddress} onChange={(e) => setBlackAddress(e.target.value)} placeholder="0x..." />
