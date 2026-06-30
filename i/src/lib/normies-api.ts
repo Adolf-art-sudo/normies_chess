@@ -24,7 +24,7 @@ const jsonTtls: Record<string, number> = {
   zombie: 60,
   agent: 60,
   legendary: 60,
-  holder: 10,
+  holder: 30,
   svg: 300
 };
 

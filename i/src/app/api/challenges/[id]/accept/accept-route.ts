@@ -10,16 +10,32 @@ import { json, errorResponse } from "@/lib/http";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-const bodySchema = z.object({ normieIds: normieIdsSchema });
+// `ownedIds` is the subset of `normieIds` the client claims to own.
+// Any id NOT listed in ownedIds is treated as an unverified/"borrowed"
+// piece (e.g. from the auto-fill random-fetch flow) and is not checked
+// against wallet holdings. Ids that ARE listed in ownedIds must be
+// genuinely owned, or the request is rejected — this preserves the
+// anti-cheat guarantee for manual entry (which marks everything as owned)
+// while allowing auto-fill to work for wallets with fewer than 16 Normies.
+const bodySchema = z.object({
+  normieIds: normieIdsSchema,
+  ownedIds: z.array(z.number().int().min(0).max(9999)).max(16).optional()
+});
 
 export async function POST(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   try {
     const { id } = await params;
     const opponent = await requireAuth(req);
-    const { normieIds } = bodySchema.parse(await req.json());
+    const { normieIds, ownedIds } = bodySchema.parse(await req.json());
+
+    // Default to the old strict behavior if the client doesn't send ownedIds
+    // (keeps this endpoint backward compatible with any other caller).
+    const claimedOwned = ownedIds ?? normieIds;
+
     const holdings = new Set(await getHolderTokens(opponent));
-    const missing = normieIds.filter((id) => !holdings.has(id));
+    const missing = claimedOwned.filter((tokenId) => !holdings.has(tokenId));
     if (missing.length) return errorResponse(403, `You do not own: ${missing.join(", ")}`);
+
     await initDb();
     const accepted = await sql<{ challenger_address: string; challenger_normie_ids: number[] }>`
       UPDATE challenges
